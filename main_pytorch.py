@@ -7,13 +7,20 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-#import torchvision
-#import torchvision.transforms as transforms
+
 from torch.utils.data import Dataset, DataLoader, TensorDataset, random_split
+
+from monai.config import print_config
+from monai.transforms import \
+    Compose, LoadPNG, AddChannel, ScaleIntensity, ToTensor, RandRotate, RandFlip, RandZoom
+from monai.networks.nets import densenet121, DenseNet
+from monai.metrics import compute_roc_auc
+
+np.random.seed(0)
+print_config()
 
 import nsml
 from nsml.constants import DATASET_PATH, GPU_NUM
-
 
 
 IMSIZE = 120, 60
@@ -57,8 +64,8 @@ def DataLoad(imdir):
         img_whole = cv2.imread(p, 0)
         h, w = img_whole.shape
         h_, w_ = h, w//2
-        l_img = img_whole[:, :w_]
-        r_img = img_whole[:, w_:2*w_]
+        l_img = img_whole[:, w_:2*w_]
+        r_img = img_whole[:, :w_]
         _, l_cls, r_cls = os.path.basename(p).split('.')[0].split('_')
         if l_cls=='0' or l_cls=='1' or l_cls=='2' or l_cls=='3':
             img.append(l_img);      lb.append(int(l_cls))
@@ -74,9 +81,9 @@ def ImagePreprocessing(img):
     print('Preprocessing ...')
     for i, im, in enumerate(img):
         tmp = cv2.resize(im, dsize=(w, h), interpolation=cv2.INTER_AREA)
-        tmp = tmp / 255.
+        #tmp = tmp / 255.
         img[i] = tmp
-    print(len(img), 'images processed!')
+    print(len(img), 'images resized!')
     return img
 
 
@@ -96,7 +103,7 @@ def ParserArguments(args):
     config = args.parse_args()
     return config.epoch, config.batch_size, config.num_classes, config.learning_rate, config.pause, config.mode
 
-
+'''
 class SampleModelTorch(nn.Module):
     def __init__(self, num_classes=4):
         super(SampleModelTorch, self).__init__()
@@ -119,7 +126,7 @@ class SampleModelTorch(nn.Module):
         x = self.fc(x)
         return x
 
-'''
+
 class PNSDataset(Dataset):
     def __init(self, x, y):
         self.len = x.shape[0]
@@ -131,6 +138,36 @@ class PNSDataset(Dataset):
         return self.len
 '''
 
+def split_dataset( image_file_list, image_label_list, valid_frac = 0.1 ):
+    valid_frac = 0.1
+    trainX, trainY = [], []
+    valX, valY = [], []
+
+    for i in range( len(image_label_list) ):
+        rann = np.random.random()
+        if rann < valid_frac:
+            valX.append(image_file_list[i])
+            valY.append(image_label_list[i])
+        else:
+            trainX.append(image_file_list[i])
+            trainY.append(image_label_list[i])
+    
+    return trainX, trainY, valX, valY
+
+class PNSDataset(Dataset):
+
+    def __init__(self, image_files, labels, transforms):
+        self.image_files = image_files
+        self.labels = labels
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, index):
+      tf_img = self.transforms( self.image_files[index] )
+      return tf_img, self.labels[index]
+
 if __name__ == '__main__':
     args = argparse.ArgumentParser()
     print(GPU_NUM)
@@ -139,17 +176,40 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     #####   Model   #####
-    model = SampleModelTorch(num_classes)
+    model = densenet121(
+        spatial_dims=2,
+        in_channels=1,
+        out_channels= num_classes,
+    ).to(device)
     #model.double()
-    model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    loss_function = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), learning_rate)
+    val_interval = 1
+
+    # criterion = nn.CrossEntropyLoss()
+    #optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    bind_model(model)
+    #bind_model(model)
 
     if ifpause:  ## for test mode
         print('Inferring Start ...')
+
+        images, labels = DataLoad(imdir=os.path.join(DATASET_PATH, 'train'))
+        images = ImagePreprocessing(images)
+        images = np.array(images)
+        labels = np.array(labels)
+
+        print( np.shape(images) )
+        print( np.shape(labels) )
+
+        dataset = TensorDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
+        subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
+        tr_set, val_set = random_split(dataset, subset_size)
+        batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
+        batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
+
+
         nsml.paused(scope=locals())
 
     if ifmode == 'train':  ## for train mode
@@ -158,49 +218,87 @@ if __name__ == '__main__':
         images, labels = DataLoad(imdir=os.path.join(DATASET_PATH, 'train'))
         images = ImagePreprocessing(images)
         images = np.array(images)
-        images = np.expand_dims(images, axis=1)
         labels = np.array(labels)
 
-        dataset = TensorDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
-        subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
-        tr_set, val_set = random_split(dataset, subset_size)
-        batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
-        batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
+        ## Define transforms
+        train_transforms = Compose([
+            AddChannel(),
+            ScaleIntensity(),
+            RandRotate(range_x=15, prob=0.5, keep_size=True),
+            RandFlip(spatial_axis=0, prob=0.5),
+            RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5, keep_size=True),
+            ToTensor()
+        ])
+
+        val_transforms = Compose([
+            AddChannel(),
+            ScaleIntensity(),
+            ToTensor()
+        ])
+        
+        # Split data
+        x_train, y_train, x_test, y_test = split_dataset( images, labels )
+
+        # dataset = PNSDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
+        # subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
+        # tr_set, val_set = random_split(dataset, subset_size)
+        # batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
+        # batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
+
+        train_ds = PNSDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).long(), train_transforms)
+        train_loader = DataLoader(train_ds, batch_size=300, shuffle=True, num_workers=10)
+
+        val_ds = PNSDataset(torch.from_numpy(x_test).float(), torch.from_numpy(y_test).long(), train_transforms)
+        val_loader = DataLoader(val_ds, batch_size=300, shuffle=True, num_workers=10)
 
         #####   Training loop   #####
-        STEP_SIZE_TRAIN = len(images) // batch_size
-        print('\n\n STEP_SIZE_TRAIN= {}\n\n'.format(STEP_SIZE_TRAIN))
-        t0 = time.time()
+        best_metric = -1
+        best_metric_epoch = -1
+        epoch_loss_values = list()
+        metric_values = list()
         for epoch in range(nb_epoch):
-            t1 = time.time()
-            print('Model fitting ...')
-            print('epoch = {} / {}'.format(epoch + 1, nb_epoch))
-            print('check point = {}'.format(epoch))
-            a, a_val, tp, tp_val = 0, 0, 0, 0
-            for i, (x_tr, y_tr) in enumerate(batch_train):
-                x_tr, y_tr = x_tr.to(device), y_tr.to(device)
+            print('-' * 10)
+            print(f"epoch {epoch + 1}/{nb_epoch}")
+            model.train()
+            epoch_loss = 0
+            step = 0
+            for batch_data in train_loader:
+                step += 1
+                inputs, labels = batch_data[0].to(device), batch_data[1].to(device)
                 optimizer.zero_grad()
-                pred = model(x_tr)
-                loss = criterion(pred, y_tr)
+                outputs = model(inputs)
+                loss = loss_function(outputs, labels)
                 loss.backward()
                 optimizer.step()
-                prob, pred_cls = torch.max(pred, 1)
-                a += y_tr.size(0)
-                tp += (pred_cls == y_tr).sum().item()
+                epoch_loss += loss.item()
+                print(f"{step}/{len(train_ds) // train_loader.batch_size}, train_loss: {loss.item():.4f}")
+                epoch_len = len(train_ds) // train_loader.batch_size
+            epoch_loss /= step
+            epoch_loss_values.append(epoch_loss)
+            print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
 
-            with torch.no_grad():
-                for j, (x_val, y_val) in enumerate(batch_val):
-                    x_val, y_val = x_val.to(device), y_val.to(device)
-                    pred_val = model(x_val)
-                    loss_val = criterion(pred_val, y_val)
-                    prob_val, pred_cls_val = torch.max(pred_val, 1)
-                    a_val += y_val.size(0)
-                    tp_val += (pred_cls_val == y_val).sum().item()
-
-            acc = tp / a
-            acc_val = tp_val / a_val
-            print("  * loss = {}\n  * acc = {}\n  * loss_val = {}\n  * acc_val = {}".format(loss.item(), acc, loss_val.item(), acc_val))
-            nsml.report(summary=True, step=epoch, epoch_total=nb_epoch, loss=loss.item(), acc=acc, val_loss=loss_val.item(), val_acc=acc_val)
-            nsml.save(epoch)
-            print('Training time for one epoch : %.1f\n' % (time.time() - t1))
-        print('Total training time : %.1f' % (time.time() - t0))
+            if (epoch + 1) % val_interval == 0:
+                model.eval()
+                with torch.no_grad():
+                    y_pred = torch.tensor([], dtype=torch.float32, device=device)
+                    y = torch.tensor([], dtype=torch.long, device=device)
+                    for val_data in val_loader:
+                        val_images, val_labels = val_data[0].to(device), val_data[1].to(device)
+                        
+                        val_images = val_images.type(torch.cuda.FloatTensor)
+                        
+                        y_pred = torch.cat([y_pred, model(val_images)], dim=0)
+                        y = torch.cat([y, val_labels], dim=0)
+                    auc_metric = compute_roc_auc(y_pred, y, to_onehot_y=True, softmax=True)
+                    metric_values.append(auc_metric)
+                    acc_value = torch.eq(y_pred.argmax(dim=1), y)
+                    acc_metric = acc_value.sum().item() / len(acc_value)
+                    if auc_metric > best_metric:
+                        best_metric = auc_metric
+                        best_metric_epoch = epoch + 1
+                        torch.save(model.state_dict(), 'best_metric_model.pth')
+                        print('saved new best metric model')
+                    print(f"current epoch: {epoch + 1} current AUC: {auc_metric:.4f}"
+                        f" current accuracy: {acc_metric:.4f} best AUC: {best_metric:.4f}"
+                        f" at epoch: {best_metric_epoch}")
+        print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
