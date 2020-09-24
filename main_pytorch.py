@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+print('Pytorch Version: ' , torch.__version__)
+
 from torch.utils.data import Dataset, DataLoader, TensorDataset, random_split
 
 from monai.config import print_config
@@ -89,7 +91,7 @@ def ImagePreprocessing(img):
 
 def ParserArguments(args):
     # Setting Hyperparameters
-    args.add_argument('--epoch', type=int, default=10)          # epoch 수 설정
+    args.add_argument('--epoch', type=int, default=5)          # epoch 수 설정
     args.add_argument('--batch_size', type=int, default=8)      # batch size 설정
     args.add_argument('--learning_rate', type=float, default=1e-5)  # learning rate 설정
     args.add_argument('--num_classes', type=int, default=4)     # 분류될 클래스 수는 4개
@@ -190,7 +192,7 @@ if __name__ == '__main__':
     #optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    #bind_model(model)
+    bind_model(model)
 
     if ifpause:  ## for test mode
         print('Inferring Start ...')
@@ -224,7 +226,7 @@ if __name__ == '__main__':
         train_transforms = Compose([
             AddChannel(),
             ScaleIntensity(),
-            RandRotate(range_x=15, prob=0.5, keep_size=True),
+            RandRotate(degrees=15, prob=0.5, reshape =False),
             RandFlip(spatial_axis=0, prob=0.5),
             RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5, keep_size=True),
             ToTensor()
@@ -245,11 +247,15 @@ if __name__ == '__main__':
         # batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
         # batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
 
-        train_ds = PNSDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).long(), train_transforms)
-        train_loader = DataLoader(train_ds, batch_size=300, shuffle=True, num_workers=10)
+        y_train = np.array(y_train)
+        y_test = np.array(y_test)
 
-        val_ds = PNSDataset(torch.from_numpy(x_test).float(), torch.from_numpy(y_test).long(), train_transforms)
-        val_loader = DataLoader(val_ds, batch_size=300, shuffle=True, num_workers=10)
+        #train_ds = PNSDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).long(), train_transforms)
+        train_ds = PNSDataset(x_train, torch.from_numpy(y_train).long(), train_transforms)
+        train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=10)
+
+        val_ds = PNSDataset(x_test, torch.from_numpy(y_test).long(), train_transforms)
+        val_loader = DataLoader(val_ds, batch_size=64, shuffle=True, num_workers=10)
 
         #####   Training loop   #####
         best_metric = -1
@@ -258,7 +264,7 @@ if __name__ == '__main__':
         metric_values = list()
         for epoch in range(nb_epoch):
             print('-' * 10)
-            print(f"epoch {epoch + 1}/{nb_epoch}")
+            print("epoch {}/{}".format(epoch + 1, nb_epoch))
             model.train()
             epoch_loss = 0
             step = 0
@@ -271,11 +277,12 @@ if __name__ == '__main__':
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
-                print(f"{step}/{len(train_ds) // train_loader.batch_size}, train_loss: {loss.item():.4f}")
+
+                print("{}/{}, train_loss: {}".format(step, len(train_ds) // train_loader.batch_size, "%.4f" % loss.item() ) )
                 epoch_len = len(train_ds) // train_loader.batch_size
             epoch_loss /= step
             epoch_loss_values.append(epoch_loss)
-            print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
+            print("epoch {} average loss: {}".format( epoch + 1,  "%.4f" % epoch_loss))
 
             if (epoch + 1) % val_interval == 0:
                 model.eval()
@@ -285,11 +292,11 @@ if __name__ == '__main__':
                     for val_data in val_loader:
                         val_images, val_labels = val_data[0].to(device), val_data[1].to(device)
                         
-                        val_images = val_images.type(torch.cuda.FloatTensor)
+                        #val_images = val_images.type(torch.cuda.FloatTensor)
                         
                         y_pred = torch.cat([y_pred, model(val_images)], dim=0)
                         y = torch.cat([y, val_labels], dim=0)
-                    auc_metric = compute_roc_auc(y_pred, y, to_onehot_y=True, softmax=True)
+                    auc_metric = compute_roc_auc(y_pred, y, to_onehot_y=True, add_softmax=True)
                     metric_values.append(auc_metric)
                     acc_value = torch.eq(y_pred.argmax(dim=1), y)
                     acc_metric = acc_value.sum().item() / len(acc_value)
@@ -298,7 +305,6 @@ if __name__ == '__main__':
                         best_metric_epoch = epoch + 1
                         torch.save(model.state_dict(), 'best_metric_model.pth')
                         print('saved new best metric model')
-                    print(f"current epoch: {epoch + 1} current AUC: {auc_metric:.4f}"
-                        f" current accuracy: {acc_metric:.4f} best AUC: {best_metric:.4f}"
-                        f" at epoch: {best_metric_epoch}")
-        print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
+                    
+                    print("current epoch: {} current AUC: {} current accuracy: {} best AUC: {} at epoch {}".format(epoch + 1, "%.4f" % auc_metric, "%.4f" % acc_metric, "%.4f" % best_metric, best_metric_epoch ))
+        print("train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}".format( "%.4f" % best_metric, best_metric_epoch))
