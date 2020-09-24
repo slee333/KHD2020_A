@@ -25,7 +25,7 @@ import nsml
 from nsml.constants import DATASET_PATH, GPU_NUM
 
 
-IMSIZE = 256, 128
+IMSIZE = 128, 64
 VAL_RATIO = 0.2
 RANDOM_SEED = 1234
 
@@ -83,7 +83,12 @@ def ImagePreprocessing(img):
     print('Preprocessing ...')
     for i, im, in enumerate(img):
         tmp = cv2.resize(im, dsize=(w, h), interpolation=cv2.INTER_AREA)
-        #tmp = tmp / 255.
+        
+        # crop center
+        # w_half = int(w/2)
+        # center_x, center_y = int(h/2), int(w/2)
+        # tmp = tmp[center_x-w_half:center_x+w_half, center_y-w_half:center_y+w_half]
+
         img[i] = tmp
     print(len(img), 'images resized!')
     return img
@@ -93,7 +98,7 @@ def ParserArguments(args):
     # Setting Hyperparameters
     args.add_argument('--epoch', type=int, default=5)          # epoch 수 설정
     args.add_argument('--batch_size', type=int, default=8)      # batch size 설정
-    args.add_argument('--learning_rate', type=float, default=1e-5)  # learning rate 설정
+    args.add_argument('--learning_rate', type=float, default=1e-6)  # learning rate 설정
     args.add_argument('--num_classes', type=int, default=4)     # 분류될 클래스 수는 4개
 
     # DO NOT CHANGE (for nsml)
@@ -156,6 +161,12 @@ def split_dataset( image_file_list, image_label_list, valid_frac = 0.1 ):
     
     return trainX, trainY, valX, valY
 
+def clone_dataset( image_file_list, image_label_list, scale = 5):
+    image_tile = np.tile( image_file_list, ( scale, 1, 1))
+    label_tile = np.tile(image_label_list, scale )
+        
+    return image_tile, label_tile
+
 class PNSDataset(Dataset):
 
     def __init__(self, image_files, labels, transforms):
@@ -185,7 +196,7 @@ if __name__ == '__main__':
     ).to(device)
     #model.double()
     loss_function = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), learning_rate)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     val_interval = 1
 
     # criterion = nn.CrossEntropyLoss()
@@ -226,8 +237,9 @@ if __name__ == '__main__':
         train_transforms = Compose([
             AddChannel(),
             ScaleIntensity(),
-            RandRotate(degrees=15, prob=0.5, reshape =False),
+            RandRotate(degrees=180, prob=0.5, reshape = False),
             RandFlip(spatial_axis=0, prob=0.5),
+            RandFlip(spatial_axis=1, prob=0.5),
             ToTensor()
         ])
             #RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5, keep_size=True),
@@ -239,7 +251,10 @@ if __name__ == '__main__':
         ])
         
         # Split data
-        x_train, y_train, x_test, y_test = split_dataset( images, labels )
+        x_train, y_train, x_test, y_test = split_dataset( images, labels, valid_frac=VAL_RATIO )
+        
+        # Clone training data
+        x_train, y_train = clone_dataset(x_train, y_train)
 
         # dataset = PNSDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
         # subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
@@ -252,10 +267,10 @@ if __name__ == '__main__':
 
         #train_ds = PNSDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).long(), train_transforms)
         train_ds = PNSDataset(x_train, torch.from_numpy(y_train).long(), train_transforms)
-        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=10)
+        train_loader = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=10)
 
         val_ds = PNSDataset(x_test, torch.from_numpy(y_test).long(), train_transforms)
-        val_loader = DataLoader(val_ds, batch_size=16, shuffle=True, num_workers=10)
+        val_loader = DataLoader(val_ds, batch_size=128, shuffle=True, num_workers=10)
 
         #####   Training loop   #####
         best_metric = -1
@@ -268,6 +283,7 @@ if __name__ == '__main__':
             model.train()
             epoch_loss = 0
             step = 0
+            a, a_val, tp, tp_val = 0, 0, 0, 0
             for batch_data in train_loader:
                 step += 1
                 inputs, labels = batch_data[0].to(device), batch_data[1].to(device)
@@ -277,6 +293,11 @@ if __name__ == '__main__':
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
+
+                # Computing accuracy?
+                prob, outputs_cls = torch.max(outputs, 1)
+                a += labels.size(0)
+                tp += (outputs_cls == labels).sum().item()
 
                 print("{}/{}, train_loss: {}".format(step, len(train_ds) // train_loader.batch_size, "%.4f" % loss.item() ) )
                 epoch_len = len(train_ds) // train_loader.batch_size
@@ -293,9 +314,16 @@ if __name__ == '__main__':
                         val_images, val_labels = val_data[0].to(device), val_data[1].to(device)
                         
                         #val_images = val_images.type(torch.cuda.FloatTensor)
-                        
-                        y_pred = torch.cat([y_pred, model(val_images)], dim=0)
+                        pred_val = model(val_images)
+                        y_pred = torch.cat([y_pred, pred_val], dim=0)
                         y = torch.cat([y, val_labels], dim=0)
+
+                        ######
+                        loss_val = loss_function(pred_val, val_labels)
+                        prob_val, pred_cls_val = torch.max(pred_val, 1)
+                        a_val += val_labels.size(0)
+                        tp_val += (pred_cls_val == val_labels).sum().item()
+
                     auc_metric = compute_roc_auc(y_pred, y, to_onehot_y=True, add_softmax=True)
                     metric_values.append(auc_metric)
                     acc_value = torch.eq(y_pred.argmax(dim=1), y)
@@ -307,4 +335,11 @@ if __name__ == '__main__':
                         print('saved new best metric model')
                     
                     print("current epoch: {} current AUC: {} current accuracy: {} best AUC: {} at epoch {}".format(epoch + 1, "%.4f" % auc_metric, "%.4f" % acc_metric, "%.4f" % best_metric, best_metric_epoch ))
+            
+            acc = tp / a
+            acc_val = tp_val / a_val
+            print("  * loss = {}\n  * acc = {}\n  * loss_val = {}\n  * acc_val = {}".format(loss.item(), acc, loss_val.item(), acc_val))
+            nsml.report(summary=True, step=epoch, epoch_total=nb_epoch, loss=loss.item(), acc=acc, val_loss=loss_val.item(), val_acc=acc_val, auc_val = auc_metric)
+            nsml.save(epoch)
         print("train completed, best_metric: {} at epoch: {}".format( "%.4f" % best_metric, best_metric_epoch))
+        nsml.save(checkpoint='MON1', save_fn= None )
