@@ -25,7 +25,7 @@ import nsml
 from nsml.constants import DATASET_PATH, GPU_NUM
 
 
-IMSIZE = 120, 60
+IMSIZE = 256, 128
 VAL_RATIO = 0.2
 RANDOM_SEED = 1234
 
@@ -197,19 +197,19 @@ if __name__ == '__main__':
     if ifpause:  ## for test mode
         print('Inferring Start ...')
 
-        images, labels = DataLoad(imdir=os.path.join(DATASET_PATH, 'train'))
-        images = ImagePreprocessing(images)
-        images = np.array(images)
-        labels = np.array(labels)
+        # images, labels = DataLoad(imdir=os.path.join(DATASET_PATH, 'train'))
+        # images = ImagePreprocessing(images)
+        # images = np.array(images)
+        # labels = np.array(labels)
 
-        print( np.shape(images) )
-        print( np.shape(labels) )
+        # print( np.shape(images) )
+        # print( np.shape(labels) )
 
-        dataset = TensorDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
-        subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
-        tr_set, val_set = random_split(dataset, subset_size)
-        batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
-        batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
+        # dataset = TensorDataset(torch.from_numpy(images).float(), torch.from_numpy(labels).long())
+        # subset_size = [len(images) - int(len(images) * VAL_RATIO),int(len(images) * VAL_RATIO)]
+        # tr_set, val_set = random_split(dataset, subset_size)
+        # batch_train = DataLoader(tr_set, batch_size=batch_size, shuffle=True)
+        # batch_val = DataLoader(val_set, batch_size=1, shuffle=False)
 
 
         nsml.paused(scope=locals())
@@ -228,9 +228,9 @@ if __name__ == '__main__':
             ScaleIntensity(),
             RandRotate(degrees=15, prob=0.5, reshape =False),
             RandFlip(spatial_axis=0, prob=0.5),
-            RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5, keep_size=True),
             ToTensor()
         ])
+            #RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5, keep_size=True),
 
         val_transforms = Compose([
             AddChannel(),
@@ -252,10 +252,10 @@ if __name__ == '__main__':
 
         #train_ds = PNSDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).long(), train_transforms)
         train_ds = PNSDataset(x_train, torch.from_numpy(y_train).long(), train_transforms)
-        train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=10)
+        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=10)
 
         val_ds = PNSDataset(x_test, torch.from_numpy(y_test).long(), train_transforms)
-        val_loader = DataLoader(val_ds, batch_size=64, shuffle=True, num_workers=10)
+        val_loader = DataLoader(val_ds, batch_size=16, shuffle=True, num_workers=10)
 
         #####   Training loop   #####
         best_metric = -1
@@ -307,4 +307,4 @@ if __name__ == '__main__':
                         print('saved new best metric model')
                     
                     print("current epoch: {} current AUC: {} current accuracy: {} best AUC: {} at epoch {}".format(epoch + 1, "%.4f" % auc_metric, "%.4f" % acc_metric, "%.4f" % best_metric, best_metric_epoch ))
-        print("train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}".format( "%.4f" % best_metric, best_metric_epoch))
+        print("train completed, best_metric: {} at epoch: {}".format( "%.4f" % best_metric, best_metric_epoch))
